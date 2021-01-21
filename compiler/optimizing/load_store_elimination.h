@@ -22,27 +22,19 @@
 namespace art {
 
 class SideEffectsAnalysis;
-class LoadStoreAnalysis;
 
 class LoadStoreElimination : public HOptimization {
  public:
   LoadStoreElimination(HGraph* graph,
-                       const SideEffectsAnalysis& side_effects,
-                       const LoadStoreAnalysis& lsa,
                        OptimizingCompilerStats* stats,
                        const char* name = kLoadStoreEliminationPassName)
-      : HOptimization(graph, name, stats),
-        side_effects_(side_effects),
-        lsa_(lsa) {}
+      : HOptimization(graph, name, stats) {}
 
   bool Run() override;
 
   static constexpr const char* kLoadStoreEliminationPassName = "load_store_elimination";
 
  private:
-  const SideEffectsAnalysis& side_effects_;
-  const LoadStoreAnalysis& lsa_;
-
   DISALLOW_COPY_AND_ASSIGN(LoadStoreElimination);
 };
 

@@ -17,7 +17,7 @@
 #ifndef ART_LIBNATIVELOADER_NATIVE_LOADER_NAMESPACE_H_
 #define ART_LIBNATIVELOADER_NATIVE_LOADER_NAMESPACE_H_
 
-#if defined(__ANDROID__)
+#if defined(ART_TARGET_ANDROID)
 
 #include <string>
 #include <variant>
@@ -42,7 +42,7 @@ struct NativeLoaderNamespace {
                                               const std::string& search_paths,
                                               const std::string& permitted_paths,
                                               const NativeLoaderNamespace* parent, bool is_shared,
-                                              bool is_greylist_enabled,
+                                              bool is_exempt_list_enabled,
                                               bool also_used_as_anonymous);
 
   NativeLoaderNamespace(NativeLoaderNamespace&&) = default;
@@ -73,6 +73,6 @@ struct NativeLoaderNamespace {
 };
 
 }  // namespace android
-#endif  // #if defined(__ANDROID__)
+#endif  // #if defined(ART_TARGET_ANDROID)
 
 #endif  // ART_LIBNATIVELOADER_NATIVE_LOADER_NAMESPACE_H_

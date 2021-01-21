@@ -34,7 +34,7 @@
 #include "base/time_utils.h"
 #include "base/utils.h"
 #include "class_linker.h"
-#include "class_root.h"
+#include "class_root-inl.h"
 #include "compiler_callbacks.h"
 #include "dex/class_accessor-inl.h"
 #include "dex/descriptors_names.h"
@@ -173,6 +173,7 @@ class MethodVerifier final : public ::art::verifier::MethodVerifier {
                                      class_linker,
                                      arena_pool,
                                      dex_file,
+                                     class_def,
                                      code_item,
                                      method_idx,
                                      can_load_classes,
@@ -184,7 +185,6 @@ class MethodVerifier final : public ::art::verifier::MethodVerifier {
        return_type_(nullptr),
        dex_cache_(dex_cache),
        class_loader_(class_loader),
-       class_def_(class_def),
        declaring_class_(nullptr),
        interesting_dex_pc_(-1),
        monitor_enter_dex_pcs_(nullptr),
@@ -257,7 +257,7 @@ class MethodVerifier final : public ::art::verifier::MethodVerifier {
    * Call this after widths have been set in "insn_flags".
    *
    * Returns "false" if something in the exception table looks fishy, but we're expecting the
-   * exception table to be somewhat sane.
+   * exception table to be valid.
    */
   bool ScanTryCatchBlocks() REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -793,7 +793,6 @@ class MethodVerifier final : public ::art::verifier::MethodVerifier {
   Handle<mirror::DexCache> dex_cache_ GUARDED_BY(Locks::mutator_lock_);
   // The class loader for the declaring class of the method.
   Handle<mirror::ClassLoader> class_loader_ GUARDED_BY(Locks::mutator_lock_);
-  const dex::ClassDef& class_def_;  // The class def of the declaring class of the method.
   const RegType* declaring_class_;  // Lazily computed reg type of the method's declaring class.
 
   // The dex PC of a FindLocksAtDexPc request, -1 otherwise.
@@ -952,6 +951,39 @@ bool MethodVerifier<kVerifierDebug>::Verify() {
       return false;
     }
 
+    // Test FastNative and CriticalNative annotations. We do this in the
+    // verifier for convenience.
+    if ((method_access_flags_ & kAccNative) != 0) {
+      // Fetch the flags from the annotations: the class linker hasn't processed
+      // them yet.
+      uint32_t native_access_flags = annotations::GetNativeMethodAnnotationAccessFlags(
+          *dex_file_, class_def_, dex_method_idx_);
+      if ((native_access_flags & kAccFastNative) != 0) {
+        if ((method_access_flags_ & kAccSynchronized) != 0) {
+          Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "fast native methods cannot be synchronized";
+          return false;
+        }
+      }
+      if ((native_access_flags & kAccCriticalNative) != 0) {
+        if ((method_access_flags_ & kAccSynchronized) != 0) {
+          Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "critical native methods cannot be synchronized";
+          return false;
+        }
+        if ((method_access_flags_ & kAccStatic) == 0) {
+          Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "critical native methods must be static";
+          return false;
+        }
+        const char* shorty = dex_file_->GetMethodShorty(method_id);
+        for (size_t i = 0, len = strlen(shorty); i < len; ++i) {
+          if (Primitive::GetType(shorty[i]) == Primitive::kPrimNot) {
+            Fail(VERIFY_ERROR_BAD_CLASS_HARD) <<
+                "critical native methods must not have references as arguments or return type";
+            return false;
+          }
+        }
+      }
+    }
+
     // This should have been rejected by the dex file verifier. Only do in debug build.
     // Note: the above will also be rejected in the dex file verifier, starting in dex version 37.
     if (kIsDebugBuild) {
@@ -1036,7 +1068,8 @@ bool MethodVerifier<kVerifierDebug>::Verify() {
     }
   }
 
-  // Sanity-check the register counts. ins + locals = registers, so make sure that ins <= registers.
+  // Consistency-check of the register counts.
+  // ins + locals = registers, so make sure that ins <= registers.
   if (code_item_accessor_.InsSize() > code_item_accessor_.RegistersSize()) {
     Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "bad register counts (ins="
                                       << code_item_accessor_.InsSize()
@@ -1077,15 +1110,6 @@ bool MethodVerifier<kVerifierDebug>::ComputeWidthsAndCountOps() {
     ++next;
     if (next.IsErrorState()) {
       break;
-    }
-    Instruction::Code opcode = it->Opcode();
-    switch (opcode) {
-      case Instruction::APUT_OBJECT:
-      case Instruction::CHECK_CAST:
-        has_check_casts_ = true;
-        break;
-      default:
-        break;
     }
     GetModifiableInstructionFlags(it.DexPc()).SetIsOpcode();
   }
@@ -1900,7 +1924,7 @@ bool MethodVerifier<kVerifierDebug>::CodeFlowVerifyMethod() {
       work_line_->CopyFromLine(reg_table_.GetLine(insn_idx));
     } else if (kIsDebugBuild) {
       /*
-       * Sanity check: retrieve the stored register line (assuming
+       * Consistency check: retrieve the stored register line (assuming
        * a full table) and make sure it actually matches.
        */
       RegisterLine* register_line = reg_table_.GetLine(insn_idx);
@@ -3755,9 +3779,6 @@ const RegType& MethodVerifier<kVerifierDebug>::ResolveClass(dex::TypeIndex class
     return *result;
   }
 
-  // Record result of class resolution attempt.
-  VerifierDeps::MaybeRecordClassResolution(*dex_file_, class_idx, klass);
-
   // If requested, check if access is allowed. Unresolved types are included in this check, as the
   // interpreter only tests whether access is allowed when a class is not pre-verified and runs in
   // the access-checks interpreter. If result is primitive, skip the access check.
@@ -3892,11 +3913,6 @@ ArtMethod* MethodVerifier<kVerifierDebug>::ResolveMethodAndCheckAccess(
     res_method = class_linker->FindResolvedMethod(
         klass, dex_cache_.Get(), class_loader_.Get(), dex_method_idx);
   }
-
-  // Record result of method resolution attempt. The klass resolution has recorded whether
-  // the class is an interface or not and therefore the type of the lookup performed above.
-  // TODO: Maybe we should not record dependency if the invoke type does not match the lookup type.
-  VerifierDeps::MaybeRecordMethodResolution(*dex_file_, dex_method_idx, res_method);
 
   bool must_fail = false;
   // This is traditional and helps with screwy bytecode. It will tell you that, yes, a method
@@ -4673,9 +4689,6 @@ ArtField* MethodVerifier<kVerifierDebug>::GetStaticField(int field_idx) {
   ClassLinker* class_linker = GetClassLinker();
   ArtField* field = class_linker->ResolveFieldJLS(field_idx, dex_cache_, class_loader_);
 
-  // Record result of the field resolution attempt.
-  VerifierDeps::MaybeRecordFieldResolution(*dex_file_, field_idx, field);
-
   if (field == nullptr) {
     VLOG(verifier) << "Unable to resolve static field " << field_idx << " ("
               << dex_file_->GetFieldName(field_id) << ") in "
@@ -4722,9 +4735,6 @@ ArtField* MethodVerifier<kVerifierDebug>::GetInstanceField(const RegType& obj_ty
   }
   ClassLinker* class_linker = GetClassLinker();
   ArtField* field = class_linker->ResolveFieldJLS(field_idx, dex_cache_, class_loader_);
-
-  // Record result of the field resolution attempt.
-  VerifierDeps::MaybeRecordFieldResolution(*dex_file_, field_idx, field);
 
   if (field == nullptr) {
     VLOG(verifier) << "Unable to resolve instance field " << field_idx << " ("
@@ -5064,6 +5074,7 @@ MethodVerifier::MethodVerifier(Thread* self,
                                ClassLinker* class_linker,
                                ArenaPool* arena_pool,
                                const DexFile* dex_file,
+                               const dex::ClassDef& class_def,
                                const dex::CodeItem* code_item,
                                uint32_t dex_method_idx,
                                bool can_load_classes,
@@ -5078,13 +5089,13 @@ MethodVerifier::MethodVerifier(Thread* self,
       work_insn_idx_(dex::kDexNoIndex),
       dex_method_idx_(dex_method_idx),
       dex_file_(dex_file),
+      class_def_(class_def),
       code_item_accessor_(*dex_file, code_item),
       // TODO: make it designated initialization when we compile as C++20.
       flags_({false, false, false, false, aot_mode}),
       encountered_failure_types_(0),
       can_load_classes_(can_load_classes),
       allow_soft_failures_(allow_soft_failures),
-      has_check_casts_(false),
       class_linker_(class_linker),
       link_(nullptr) {
   self->PushVerifier(this);
@@ -5158,14 +5169,15 @@ MethodVerifier::FailureData MethodVerifier::VerifyMethod(Thread* self,
 }
 
 // Return whether the runtime knows how to execute a method without needing to
-// re-verify it at runtime (and therefore save on first use of the class). We
-// currently only support it for access checks, where the runtime will mark the
-// methods as needing access checks and have the interpreter execute with them.
+// re-verify it at runtime (and therefore save on first use of the class).
 // The AOT/JIT compiled code is not affected.
 static inline bool CanRuntimeHandleVerificationFailure(uint32_t encountered_failure_types) {
   constexpr uint32_t unresolved_mask =
+      verifier::VerifyError::VERIFY_ERROR_CLASS_CHANGE |
+      verifier::VerifyError::VERIFY_ERROR_INSTANTIATION |
       verifier::VerifyError::VERIFY_ERROR_ACCESS_CLASS |
       verifier::VerifyError::VERIFY_ERROR_ACCESS_FIELD |
+      verifier::VerifyError::VERIFY_ERROR_NO_METHOD |
       verifier::VerifyError::VERIFY_ERROR_ACCESS_METHOD;
   return (encountered_failure_types & (~unresolved_mask)) == 0;
 }
@@ -5223,6 +5235,7 @@ MethodVerifier::FailureData MethodVerifier::VerifyMethod(Thread* self,
     }
 
     bool set_dont_compile = false;
+    bool must_count_locks = false;
     if (verifier.failures_.size() != 0) {
       if (VLOG_IS_ON(verifier)) {
         verifier.DumpFailures(VLOG_STREAM(verifier) << "Soft verification failures in "
@@ -5237,31 +5250,26 @@ MethodVerifier::FailureData MethodVerifier::VerifyMethod(Thread* self,
       } else {
         result.kind = FailureKind::kSoftFailure;
       }
-      if (method != nullptr &&
-          !CanCompilerHandleVerificationFailure(verifier.encountered_failure_types_)) {
+      if (!CanCompilerHandleVerificationFailure(verifier.encountered_failure_types_)) {
         set_dont_compile = true;
       }
-    }
-    if (method != nullptr) {
-      if (verifier.HasInstructionThatWillThrow()) {
-        set_dont_compile = true;
-        if (aot_mode && (callbacks != nullptr) && !callbacks->IsBootImage()) {
-          // When compiling apps, make HasInstructionThatWillThrow a soft error to trigger
-          // re-verification at runtime.
-          // The dead code after the throw is not verified and might be invalid. This may cause
-          // the JIT compiler to crash since it assumes that all the code is valid.
-          //
-          // There's a strong assumption that the entire boot image is verified and all its dex
-          // code is valid (even the dead and unverified one). As such this is done only for apps.
-          // (CompilerDriver DCHECKs in VerifyClassVisitor that methods from boot image are
-          // fully verified).
-          result.kind = FailureKind::kSoftFailure;
-        }
-      }
-      bool must_count_locks = false;
       if ((verifier.encountered_failure_types_ & VerifyError::VERIFY_ERROR_LOCKING) != 0) {
         must_count_locks = true;
       }
+    }
+
+    if (verifier.HasInstructionThatWillThrow()) {
+      // The dead code after the throw is not verified and might be invalid. This may cause
+      // the JIT compiler to crash since it assumes that all the code is valid.
+      set_dont_compile = true;
+      if (aot_mode) {
+        // Make HasInstructionThatWillThrow a soft error to trigger
+        // re-verification at runtime.
+        result.kind = FailureKind::kSoftFailure;
+      }
+    }
+
+    if (method != nullptr) {
       verifier_callback->SetDontCompile(method, set_dont_compile);
       verifier_callback->SetMustCountLocks(method, must_count_locks);
     }
@@ -5519,7 +5527,6 @@ std::ostream& MethodVerifier::Fail(VerifyError error, bool pending_exc) {
   if (pending_exc) {
     switch (error) {
       case VERIFY_ERROR_NO_CLASS:
-      case VERIFY_ERROR_NO_FIELD:
       case VERIFY_ERROR_NO_METHOD:
       case VERIFY_ERROR_ACCESS_CLASS:
       case VERIFY_ERROR_ACCESS_FIELD:
@@ -5531,6 +5538,7 @@ std::ostream& MethodVerifier::Fail(VerifyError error, bool pending_exc) {
         if (IsAotMode() || !can_load_classes_) {
           if (error != VERIFY_ERROR_ACCESS_CLASS &&
               error != VERIFY_ERROR_ACCESS_FIELD &&
+              error != VERIFY_ERROR_NO_METHOD &&
               error != VERIFY_ERROR_ACCESS_METHOD) {
             // If we're optimistically running verification at compile time, turn NO_xxx,
             // class change and instantiation errors into soft verification errors so that we

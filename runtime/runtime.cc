@@ -68,7 +68,7 @@
 #include "base/unix_file/fd_file.h"
 #include "base/utils.h"
 #include "class_linker-inl.h"
-#include "class_root.h"
+#include "class_root-inl.h"
 #include "compiler_callbacks.h"
 #include "debugger.h"
 #include "dex/art_dex_file_loader.h"
@@ -268,8 +268,8 @@ Runtime::Runtime()
       dump_gc_performance_on_shutdown_(false),
       preinitialization_transactions_(),
       verify_(verifier::VerifyMode::kNone),
-      allow_dex_file_fallback_(true),
       target_sdk_version_(static_cast<uint32_t>(SdkVersion::kUnset)),
+      compat_framework_(),
       implicit_null_checks_(false),
       implicit_so_checks_(false),
       implicit_suspend_checks_(false),
@@ -686,8 +686,14 @@ void Runtime::PreZygoteFork() {
 }
 
 void Runtime::PostZygoteFork() {
-  if (GetJit() != nullptr) {
-    GetJit()->PostZygoteFork();
+  jit::Jit* jit = GetJit();
+  if (jit != nullptr) {
+    jit->PostZygoteFork();
+    // Ensure that the threads in the JIT pool have been created with the right
+    // priority.
+    if (kIsDebugBuild && jit->GetThreadPool() != nullptr) {
+      jit->GetThreadPool()->CheckPthreadPriority(jit->GetThreadPoolPthreadPriority());
+    }
   }
   // Reset all stats.
   ResetStats(0xFFFFFFFF);
@@ -1080,6 +1086,9 @@ void Runtime::InitNonZygoteOrPostFork(
       SetJniIdType(JniIdType::kPointer);
     }
   }
+  ATraceIntegerValue(
+      "profilebootclasspath",
+      static_cast<int>(jit_options_->GetProfileSaverOptions().GetProfileBootClassPath()));
   // Start the JDWP thread. If the command-line debugger flags specified "suspend=y",
   // this will pause the runtime (in the internal debugger implementation), so we probably want
   // this to come last.
@@ -1191,7 +1200,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   using Opt = RuntimeArgumentMap;
   Opt runtime_options(std::move(runtime_options_in));
   ScopedTrace trace(__FUNCTION__);
-  CHECK_EQ(sysconf(_SC_PAGE_SIZE), kPageSize);
+  CHECK_EQ(static_cast<size_t>(sysconf(_SC_PAGE_SIZE)), kPageSize);
 
   // Early override for logging output.
   if (runtime_options.Exists(Opt::UseStderrLogger)) {
@@ -1315,7 +1324,6 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   intern_table_ = new InternTable;
 
   verify_ = runtime_options.GetOrDefault(Opt::Verify);
-  allow_dex_file_fallback_ = !runtime_options.Exists(Opt::NoDexFileFallback);
 
   target_sdk_version_ = runtime_options.GetOrDefault(Opt::TargetSdkVersion);
 
@@ -1376,8 +1384,6 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   // Generational CC collection is currently only compatible with Baker read barriers.
   bool use_generational_cc = kUseBakerReadBarrier && xgc_option.generational_cc;
 
-  image_space_loading_order_ = runtime_options.GetOrDefault(Opt::ImageSpaceLoadingOrder);
-
   heap_ = new gc::Heap(runtime_options.GetOrDefault(Opt::MemoryInitialSize),
                        runtime_options.GetOrDefault(Opt::HeapGrowthLimit),
                        runtime_options.GetOrDefault(Opt::HeapMinFree),
@@ -1403,6 +1409,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
                        runtime_options.GetOrDefault(Opt::LongPauseLogThreshold),
                        runtime_options.GetOrDefault(Opt::LongGCLogThreshold),
                        runtime_options.Exists(Opt::IgnoreMaxFootprint),
+                       runtime_options.GetOrDefault(Opt::AlwaysLogExplicitGcs),
                        runtime_options.GetOrDefault(Opt::UseTLAB),
                        xgc_option.verify_pre_gc_heap_,
                        xgc_option.verify_pre_sweeping_heap_,
@@ -1416,13 +1423,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
                        use_generational_cc,
                        runtime_options.GetOrDefault(Opt::HSpaceCompactForOOMMinIntervalsMs),
                        runtime_options.Exists(Opt::DumpRegionInfoBeforeGC),
-                       runtime_options.Exists(Opt::DumpRegionInfoAfterGC),
-                       image_space_loading_order_);
-
-  if (!heap_->HasBootImageSpace() && !allow_dex_file_fallback_) {
-    LOG(ERROR) << "Dex file fallback disabled, cannot continue without image.";
-    return false;
-  }
+                       runtime_options.Exists(Opt::DumpRegionInfoAfterGC));
 
   dump_gc_performance_on_shutdown_ = runtime_options.Exists(Opt::DumpGCPerformanceOnShutdown);
 
@@ -1586,10 +1587,13 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
         GetInternTable()->AddImageStringsToTable(image_space, VoidFunctor());
       }
     }
-    if (heap_->GetBootImageSpaces().size() != GetBootClassPath().size()) {
+
+    const size_t total_components = gc::space::ImageSpace::GetNumberOfComponents(
+        ArrayRef<gc::space::ImageSpace* const>(heap_->GetBootImageSpaces()));
+    if (total_components != GetBootClassPath().size()) {
       // The boot image did not contain all boot class path components. Load the rest.
-      DCHECK_LT(heap_->GetBootImageSpaces().size(), GetBootClassPath().size());
-      size_t start = heap_->GetBootImageSpaces().size();
+      CHECK_LT(total_components, GetBootClassPath().size());
+      size_t start = total_components;
       DCHECK_LT(start, GetBootClassPath().size());
       std::vector<std::unique_ptr<const DexFile>> extra_boot_class_path;
       if (runtime_options.Exists(Opt::BootClassPathDexList)) {
@@ -1708,6 +1712,8 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   // Class-roots are setup, we can now finish initializing the JniIdManager.
   GetJniIdManager()->Init(self);
 
+  InitMetrics(runtime_options);
+
   // Runtime initialization is largely done now.
   // We load plugins first since that can modify the runtime state slightly.
   // Load all plugins
@@ -1790,7 +1796,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 
   if (IsZygote() && IsPerfettoHprofEnabled()) {
     constexpr const char* plugin_name = kIsDebugBuild ?
-    "libperfetto_hprofd.so" : "libperfetto_hprof.so";
+        "libperfetto_hprofd.so" : "libperfetto_hprof.so";
     // Load eagerly in Zygote to improve app startup times. This will make
     // subsequent dlopens for the library no-ops.
     dlopen(plugin_name, RTLD_NOW | RTLD_LOCAL);
@@ -1804,6 +1810,13 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   }
 
   return true;
+}
+
+void Runtime::InitMetrics(const RuntimeArgumentMap& runtime_options) {
+  auto metrics_config = metrics::ReportingConfig::FromRuntimeArguments(runtime_options);
+  if (metrics_config.ReportingEnabled()) {
+    metrics_reporter_ = metrics::MetricsReporter::Create(metrics_config, GetMetrics());
+  }
 }
 
 bool Runtime::EnsurePluginLoaded(const char* plugin_name, std::string* error_msg) {
@@ -2023,6 +2036,7 @@ void Runtime::DumpForSigQuit(std::ostream& os) {
   }
   DumpDeoptimizations(os);
   TrackedAllocators::Dump(os);
+  GetMetrics()->DumpForSigQuit(os);
   os << "\n";
 
   thread_list_->DumpForSigQuit(os);
@@ -2307,8 +2321,10 @@ ArtMethod* Runtime::CreateResolutionMethod() {
   if (IsAotCompiler()) {
     PointerSize pointer_size = GetInstructionSetPointerSize(instruction_set_);
     method->SetEntryPointFromQuickCompiledCodePtrSize(nullptr, pointer_size);
+    method->SetEntryPointFromJniPtrSize(nullptr, pointer_size);
   } else {
     method->SetEntryPointFromQuickCompiledCode(GetQuickResolutionStub());
+    method->SetEntryPointFromJni(GetJniDlsymLookupCriticalStub());
   }
   return method;
 }
@@ -2961,14 +2977,6 @@ class Runtime::NotifyStartupCompletedTask : public gc::HeapTask {
     {
       ScopedTrace trace("Releasing app image spaces metadata");
       ScopedObjectAccess soa(Thread::Current());
-      for (gc::space::ContinuousSpace* space : runtime->GetHeap()->GetContinuousSpaces()) {
-        if (space->IsImageSpace()) {
-          gc::space::ImageSpace* image_space = space->AsImageSpace();
-          if (image_space->GetImageHeader().IsAppImage()) {
-            image_space->DisablePreResolvedStrings();
-          }
-        }
-      }
       // Request empty checkpoints to make sure no threads are accessing the image space metadata
       // section when we madvise it. Use GC exclusion to prevent deadlocks that may happen if
       // multiple threads are attempting to run empty checkpoints at the same time.

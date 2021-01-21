@@ -16,14 +16,16 @@
 cc_library_headers {
     name: "libopenjdkjvmti_headers",
     visibility: ["//visibility:public"],
+    header_libs: ["jni_headers"],
     host_supported: true,
+    export_header_lib_headers: ["jni_headers"],
     export_include_dirs: ["include"],
     sdk_version: "current",
 
     apex_available: [
         "//apex_available:platform",
+        "com.android.art",
         "com.android.art.debug",
-        "com.android.art.release",
     ],
 }
 
@@ -64,6 +66,7 @@ cc_defaults {
         "transform.cc",
     ],
     header_libs: [
+        "art_cmdlineparser_headers",
         "libnativehelper_header_only",
         "libopenjdkjvmti_headers",
     ],
@@ -83,7 +86,7 @@ art_cc_library {
         "libartbase",
     ],
     apex_available: [
-        "com.android.art.release",
+        "com.android.art",
         "com.android.art.debug",
     ],
 }

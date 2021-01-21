@@ -46,13 +46,13 @@ function cparg {
 
 function boot_classpath_arg {
   local dir="$1"
-  local suffix="$2"
-  shift 2
+  shift 1
   printf -- "--vm-arg -Xbootclasspath"
   for var
   do
-    printf -- ":${dir}/${var}${suffix}.jar";
+    printf -- ":${dir}/${var}.jar";
   done
+  printf -- ":/apex/com.android.i18n/javalib/core-icu4j.jar:/apex/com.android.conscrypt/javalib/conscrypt.jar";
 }
 
 function usage {
@@ -71,7 +71,7 @@ function usage {
     --dry-run              Print vogar command-line, but do not run.
     --no-getrandom         Ignore failures from getrandom() (for kernel < 3.17).
     --no-jit               Disable JIT (device|host only).
-    --Xgc:gcstress         Enable GC stress configuration (device|host only).
+    --gcstress             Enable GC stress configuration (device|host only).
 
   The script passes unrecognized options to the command-line created for vogar.
 
@@ -112,7 +112,6 @@ working_packages=("libcore.android.system"
                   "libcore.libcore.net"
                   "libcore.libcore.reflect"
                   "libcore.libcore.util"
-                  "libcore.libcore.timezone"
                   "libcore.sun.invoke"
                   "libcore.sun.net"
                   "libcore.sun.misc"
@@ -145,9 +144,9 @@ source build/envsetup.sh >&/dev/null # for get_build_var, setpaths
 setpaths # include platform prebuilt java, javac, etc in $PATH.
 
 # Note: This must start with the CORE_IMG_JARS in Android.common_path.mk
-# because that's what we use for compiling the core.art image.
+# because that's what we use for compiling the boot.art image.
 # It may contain additional modules from TEST_CORE_JARS.
-BOOT_CLASSPATH_JARS="core-oj core-libart core-icu4j okhttp bouncycastle apache-xml conscrypt"
+BOOT_CLASSPATH_JARS="core-oj core-libart okhttp bouncycastle apache-xml"
 
 DEPS="core-tests jsr166-tests mockito-target"
 
@@ -166,9 +165,10 @@ done
 # Use JIT compiling by default.
 use_jit=true
 
-gcstress=false
 debug=false
 dry_run=false
+gcstress=false
+heap_poisoning=${ART_HEAP_POISONING:-false}
 
 # Run tests that use the getrandom() syscall? (Requires Linux 3.17+).
 getrandom=true
@@ -183,11 +183,9 @@ vogar_args=""
 while [ -n "$1" ]; do
   case "$1" in
     --mode=device)
-      # Use --mode=device_testdex not --mode=device for buildbot-build.sh.
-      # See commit 191cae33c7c24e for more details.
-      vogar_args="$vogar_args --mode=device_testdex"
-      vogar_args="$vogar_args --vm-arg -Ximage:/data/art-test/core.art"
-      vogar_args="$vogar_args $(boot_classpath_arg /system/framework -testdex $BOOT_CLASSPATH_JARS)"
+      vogar_args="$vogar_args --mode=device"
+      vogar_args="$vogar_args --vm-arg -Ximage:/apex/com.android.art/javalib/boot.art"
+      vogar_args="$vogar_args $(boot_classpath_arg /apex/com.android.art/javalib $BOOT_CLASSPATH_JARS)"
       execution_mode="device"
       ;;
     --mode=host)
@@ -212,8 +210,14 @@ while [ -n "$1" ]; do
       vogar_args="$vogar_args --vm-arg -XXlib:libartd.so --vm-arg -XX:SlowDebug=true"
       debug=true
       ;;
+    --gcstress)
+      vogar_args="$vogar_args --vm-arg -Xgc:gcstress"
+      gcstress=true
+      ;;
     -Xgc:gcstress)
-      vogar_args="$vogar_args $1"
+      # Deprecated option for selecting gcstress (b/172923084).
+      echo "Warning: -Xgc:gcstress is deprecated, use --gcstress instead." 1>&2
+      vogar_args="$vogar_args $1" # note: requires --vm-arg before -Xgc:gcstress
       gcstress=true
       ;;
     --dry-run)
@@ -242,7 +246,7 @@ if [ -z "$execution_mode" ]; then
 fi
 
 # Default timeout, gets overridden on device under gcstress.
-timeout_secs=480
+default_timeout_secs=480
 
 if [ $execution_mode = "device" ]; then
   # Honor environment variable ART_TEST_CHROOT.
@@ -262,16 +266,31 @@ if [ $execution_mode = "device" ]; then
   # the default timeout.
   if $gcstress; then
     if $debug; then
-      timeout_secs=1440
+      default_timeout_secs=1440
     else
-      timeout_secs=900
+      default_timeout_secs=900
     fi
+  elif $heap_poisoning && $debug; then
+    # Increase the timeout for heap poisoning and debug combo
+    # following ICU rewrites (b/161420453).
+    default_timeout_secs=600
   fi
-fi  # $execution_mode = "device"
+elif [ $execution_mode = "host" ]; then
+  # Increase timeout for gcstress and debug combo following ICU
+  # rewrites (b/161420453).
+  if $gcstress && $debug; then
+    default_timeout_secs=600
+  fi
+fi
 
 if [ $execution_mode = "device" -o $execution_mode = "host" ]; then
-  # Add timeout to vogar command-line.
-  vogar_args="$vogar_args --timeout $timeout_secs"
+  # Add timeout to vogar command-line (if not explicitly present in the command-line arguments) .
+  if [[ "$vogar_args" != *" --timeout "* ]]; then
+    vogar_args="$vogar_args --timeout $default_timeout_secs"
+  fi
+
+  # Suppress explicit gc logs that are triggered an absurd number of times by these tests.
+  vogar_args="$vogar_args --vm-arg -XX:AlwaysLogExplicitGcs:false"
 
   # set the toolchain to use.
   vogar_args="$vogar_args --toolchain d8 --language CUR"
@@ -288,6 +307,10 @@ if [ $execution_mode = "device" -o $execution_mode = "host" ]; then
     if $debug; then
       expectations="$expectations --expectations art/tools/libcore_gcstress_debug_failures.txt"
     fi
+
+    # Bump pause threshold as long pauses cause explicit gc logging to occur irrespective
+    # of -XX:AlwayLogExplicitGcs:false.
+    vogar_args="$vogar_args --vm-arg -XX:LongPauseLogThreshold=15" # 15 ms (default: 5ms)
   else
     # We only run this package when user has not specified packages
     # to run and not under gcstress as it can cause timeouts. See

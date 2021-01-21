@@ -108,11 +108,11 @@ TEST_F(UtilsTest, Split) {
 }
 
 TEST_F(UtilsTest, GetProcessStatus) {
-  EXPECT_EQ("utils_test", GetProcessStatus("Name"));
+  EXPECT_EQ("art_libartbase_", GetProcessStatus("Name"));
   EXPECT_EQ("R (running)", GetProcessStatus("State"));
   EXPECT_EQ("<unknown>", GetProcessStatus("tate"));
   EXPECT_EQ("<unknown>", GetProcessStatus("e"));
-  EXPECT_EQ("<unknown>", GetProcessStatus("Dummy"));
+  EXPECT_EQ("<unknown>", GetProcessStatus("InvalidFieldName"));
 }
 
 }  // namespace art

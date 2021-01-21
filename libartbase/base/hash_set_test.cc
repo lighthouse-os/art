@@ -357,7 +357,7 @@ TEST_F(HashSetTest, TestReserve) {
 }
 
 TEST_F(HashSetTest, IteratorConversion) {
-  const char* test_string = "dummy";
+  const char* test_string = "test string";
   HashSet<std::string> hash_set;
   HashSet<std::string>::iterator it = hash_set.insert(test_string).first;
   HashSet<std::string>::const_iterator cit = it;
@@ -366,7 +366,7 @@ TEST_F(HashSetTest, IteratorConversion) {
 }
 
 TEST_F(HashSetTest, StringSearchStringView) {
-  const char* test_string = "dummy";
+  const char* test_string = "test string";
   HashSet<std::string> hash_set;
   HashSet<std::string>::iterator insert_pos = hash_set.insert(test_string).first;
   HashSet<std::string>::iterator it = hash_set.find(std::string_view(test_string));
@@ -374,11 +374,24 @@ TEST_F(HashSetTest, StringSearchStringView) {
 }
 
 TEST_F(HashSetTest, DoubleInsert) {
-  const char* test_string = "dummy";
+  const char* test_string = "test string";
   HashSet<std::string> hash_set;
   hash_set.insert(test_string);
   hash_set.insert(test_string);
   ASSERT_EQ(1u, hash_set.size());
+}
+
+TEST_F(HashSetTest, Preallocated) {
+  static const size_t kBufferSize = 64;
+  uint32_t buffer[kBufferSize];
+  HashSet<uint32_t> hash_set(buffer, kBufferSize);
+  size_t max_without_resize = kBufferSize * hash_set.GetMaxLoadFactor();
+  for (size_t i = 0; i != max_without_resize; ++i) {
+    hash_set.insert(i);
+  }
+  ASSERT_FALSE(hash_set.owns_data_);
+  hash_set.insert(max_without_resize);
+  ASSERT_TRUE(hash_set.owns_data_);
 }
 
 }  // namespace art

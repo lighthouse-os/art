@@ -55,7 +55,7 @@ struct ClassDef;
 
 namespace gc {
 namespace collector {
-class DummyOatFile;
+class FakeOatFile;
 }  // namespace collector
 }  // namespace gc
 
@@ -70,7 +70,7 @@ enum OatClassType {
   kOatClassMax = 3,
 };
 
-std::ostream& operator<<(std::ostream& os, const OatClassType& rhs);
+std::ostream& operator<<(std::ostream& os, OatClassType rhs);
 
 class PACKED(4) OatMethodOffsets {
  public:
@@ -378,6 +378,9 @@ class OatFile {
     return external_dex_files_.empty();
   }
 
+  // Returns whether an image (e.g. app image) is required to safely execute this OAT file.
+  bool RequiresImage() const;
+
  protected:
   OatFile(const std::string& filename, bool executable);
 
@@ -460,7 +463,7 @@ class OatFile {
   // by the `dex_filenames` parameter, in case the OatFile does not embed the dex code.
   std::vector<std::unique_ptr<const DexFile>> external_dex_files_;
 
-  friend class gc::collector::DummyOatFile;  // For modifying begin_ and end_.
+  friend class gc::collector::FakeOatFile;  // For modifying begin_ and end_.
   friend class OatClass;
   friend class art::OatDexFile;
   friend class OatDumper;  // For GetBase and GetLimit
@@ -519,6 +522,14 @@ class OatDexFile final {
     return type_bss_mapping_;
   }
 
+  const IndexBssMapping* GetPublicTypeBssMapping() const {
+    return public_type_bss_mapping_;
+  }
+
+  const IndexBssMapping* GetPackageTypeBssMapping() const {
+    return package_type_bss_mapping_;
+  }
+
   const IndexBssMapping* GetStringBssMapping() const {
     return string_bss_mapping_;
   }
@@ -562,6 +573,8 @@ class OatDexFile final {
              const uint8_t* lookup_table_data,
              const IndexBssMapping* method_bss_mapping,
              const IndexBssMapping* type_bss_mapping,
+             const IndexBssMapping* public_type_bss_mapping,
+             const IndexBssMapping* package_type_bss_mapping,
              const IndexBssMapping* string_bss_mapping,
              const uint32_t* oat_class_offsets_pointer,
              const DexLayoutSections* dex_layout_sections);
@@ -585,6 +598,8 @@ class OatDexFile final {
   const uint8_t* const lookup_table_data_ = nullptr;
   const IndexBssMapping* const method_bss_mapping_ = nullptr;
   const IndexBssMapping* const type_bss_mapping_ = nullptr;
+  const IndexBssMapping* const public_type_bss_mapping_ = nullptr;
+  const IndexBssMapping* const package_type_bss_mapping_ = nullptr;
   const IndexBssMapping* const string_bss_mapping_ = nullptr;
   const uint32_t* const oat_class_offsets_pointer_ = nullptr;
   TypeLookupTable lookup_table_;

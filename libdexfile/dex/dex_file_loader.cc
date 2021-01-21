@@ -211,6 +211,7 @@ std::string DexFileLoader::GetDexCanonicalLocation(const char* dex_location) {
 bool DexFileLoader::GetMultiDexChecksums(
     const char* filename ATTRIBUTE_UNUSED,
     std::vector<uint32_t>* checksums ATTRIBUTE_UNUSED,
+    std::vector<std::string>* dex_locations ATTRIBUTE_UNUSED,
     std::string* error_msg,
     int zip_fd ATTRIBUTE_UNUSED,
     bool* zip_file_only_contains_uncompress_dex ATTRIBUTE_UNUSED) const {
@@ -415,9 +416,11 @@ std::unique_ptr<const DexFile> DexFileLoader::OpenOneDexFileFromZip(
     return nullptr;
   }
   VerifyResult verify_result;
+  auto map_data = map.data();
+  auto map_size = map.size();
   std::unique_ptr<const DexFile> dex_file = OpenCommon(
-      map.data(),
-      map.size(),
+      map_data,
+      map_size,
       /*data_base=*/ nullptr,
       /*data_size=*/ 0u,
       location,

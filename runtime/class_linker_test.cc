@@ -26,7 +26,7 @@
 #include "art_method-inl.h"
 #include "base/enums.h"
 #include "class_linker-inl.h"
-#include "class_root.h"
+#include "class_root-inl.h"
 #include "common_runtime_test.h"
 #include "dex/dex_file_types.h"
 #include "dex/signature-inl.h"
@@ -1528,13 +1528,10 @@ TEST_F(ClassLinkerTest, RegisterDexFileName) {
     }
     ASSERT_TRUE(dex_cache != nullptr);
   }
-  // Make a copy of the dex cache and change the name.
-  dex_cache.Assign(mirror::Object::Clone(dex_cache, soa.Self())->AsDexCache());
   const uint16_t data[] = { 0x20AC, 0x20A1 };
   Handle<mirror::String> location(hs.NewHandle(mirror::String::AllocFromUtf16(soa.Self(),
                                                                               arraysize(data),
                                                                               data)));
-  dex_cache->SetLocation(location.Get());
   const DexFile* old_dex_file = dex_cache->GetDexFile();
 
   std::unique_ptr<DexFile> dex_file(new StandardDexFile(old_dex_file->Begin(),
@@ -1543,6 +1540,10 @@ TEST_F(ClassLinkerTest, RegisterDexFileName) {
                                                         0u,
                                                         nullptr,
                                                         nullptr));
+  // Make a copy of the dex cache with changed name.
+  LinearAlloc* alloc = Runtime::Current()->GetLinearAlloc();
+  dex_cache.Assign(class_linker->AllocAndInitializeDexCache(Thread::Current(), *dex_file, alloc));
+  DCHECK_EQ(dex_cache->GetLocation()->CompareTo(location.Get()), 0);
   {
     WriterMutexLock mu(soa.Self(), *Locks::dex_lock_);
     // Check that inserting with a UTF16 name works.
@@ -1768,7 +1769,7 @@ TEST_F(ClassLinkerClassLoaderTest, CreateClassLoaderChain) {
   // in the top parent.
   VerifyClassResolution("LDefinedInAC;", class_loader_d, class_loader_a);
 
-  // Sanity check that we don't find an undefined class.
+  // Check that we don't find an undefined class.
   VerifyClassResolution("LNotDefined;", class_loader_d, nullptr, /*should_find=*/ false);
 }
 

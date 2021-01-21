@@ -31,7 +31,7 @@
 #include "base/safe_map.h"
 #include "base/stl_util.h"
 #include "class_linker-inl.h"
-#include "class_root.h"
+#include "class_root-inl.h"
 #include "dex/dex_file-inl.h"
 #include "dex/utf.h"
 #include "fault_handler.h"
@@ -47,7 +47,7 @@
 #include "mirror/class-inl.h"
 #include "mirror/class_loader.h"
 #include "mirror/dex_cache-inl.h"
-#include "mirror/field-inl.h"
+#include "mirror/field.h"
 #include "mirror/method.h"
 #include "mirror/object-inl.h"
 #include "mirror/object_array-alloc-inl.h"
@@ -531,11 +531,10 @@ class JNI {
     ArtMethod* m = jni::DecodeArtMethod(mid);
     ObjPtr<mirror::Executable> method;
     DCHECK_EQ(Runtime::Current()->GetClassLinker()->GetImagePointerSize(), kRuntimePointerSize);
-    DCHECK(!Runtime::Current()->IsActiveTransaction());
     if (m->IsConstructor()) {
-      method = mirror::Constructor::CreateFromArtMethod<kRuntimePointerSize, false>(soa.Self(), m);
+      method = mirror::Constructor::CreateFromArtMethod<kRuntimePointerSize>(soa.Self(), m);
     } else {
-      method = mirror::Method::CreateFromArtMethod<kRuntimePointerSize, false>(soa.Self(), m);
+      method = mirror::Method::CreateFromArtMethod<kRuntimePointerSize>(soa.Self(), m);
     }
     return soa.AddLocalReference<jobject>(method);
   }
@@ -545,7 +544,7 @@ class JNI {
     ScopedObjectAccess soa(env);
     ArtField* f = jni::DecodeArtField(fid);
     return soa.AddLocalReference<jobject>(
-        mirror::Field::CreateFromArtField<kRuntimePointerSize>(soa.Self(), f, true));
+        mirror::Field::CreateFromArtField(soa.Self(), f, true));
   }
 
   static jclass GetObjectClass(JNIEnv* env, jobject java_object) {
@@ -1839,8 +1838,9 @@ class JNI {
     } else {
       CHECK_NON_NULL_MEMCPY_ARGUMENT(length, buf);
       if (s->IsCompressed()) {
+        const uint8_t* src = s->GetValueCompressed() + start;
         for (int i = 0; i < length; ++i) {
-          buf[i] = static_cast<jchar>(s->CharAt(start+i));
+          buf[i] = static_cast<jchar>(src[i]);
         }
       } else {
         const jchar* chars = static_cast<jchar*>(s->GetValue());
@@ -1858,14 +1858,21 @@ class JNI {
       ThrowSIOOBE(soa, start, length, s->GetLength());
     } else {
       CHECK_NON_NULL_MEMCPY_ARGUMENT(length, buf);
+      if (length == 0 && buf == nullptr) {
+        // Don't touch anything when length is 0 and null buffer.
+        return;
+      }
       if (s->IsCompressed()) {
+        const uint8_t* src = s->GetValueCompressed() + start;
         for (int i = 0; i < length; ++i) {
-          buf[i] = s->CharAt(start+i);
+          buf[i] = static_cast<jchar>(src[i]);
         }
+        buf[length] = '\0';
       } else {
         const jchar* chars = s->GetValue();
         size_t bytes = CountUtf8Bytes(chars + start, length);
         ConvertUtf16ToModifiedUtf8(buf, bytes, chars + start, length);
+        buf[bytes] = '\0';
       }
     }
   }
@@ -1879,8 +1886,9 @@ class JNI {
       jchar* chars = new jchar[s->GetLength()];
       if (s->IsCompressed()) {
         int32_t length = s->GetLength();
+        const uint8_t* src = s->GetValueCompressed();
         for (int i = 0; i < length; ++i) {
-          chars[i] = s->CharAt(i);
+          chars[i] = static_cast<jchar>(src[i]);
         }
       } else {
         memcpy(chars, s->GetValue(), sizeof(jchar) * s->GetLength());
@@ -1910,28 +1918,29 @@ class JNI {
     ScopedObjectAccess soa(env);
     ObjPtr<mirror::String> s = soa.Decode<mirror::String>(java_string);
     gc::Heap* heap = Runtime::Current()->GetHeap();
-    if (heap->IsMovableObject(s)) {
-      StackHandleScope<1> hs(soa.Self());
-      HandleWrapperObjPtr<mirror::String> h(hs.NewHandleWrapper(&s));
-      if (!kUseReadBarrier) {
-        heap->IncrementDisableMovingGC(soa.Self());
-      } else {
-        // For the CC collector, we only need to wait for the thread flip rather than the whole GC
-        // to occur thanks to the to-space invariant.
-        heap->IncrementDisableThreadFlip(soa.Self());
-      }
-    }
     if (s->IsCompressed()) {
       if (is_copy != nullptr) {
         *is_copy = JNI_TRUE;
       }
       int32_t length = s->GetLength();
+      const uint8_t* src = s->GetValueCompressed();
       jchar* chars = new jchar[length];
       for (int i = 0; i < length; ++i) {
-        chars[i] = s->CharAt(i);
+        chars[i] = static_cast<jchar>(src[i]);
       }
       return chars;
     } else {
+      if (heap->IsMovableObject(s)) {
+        StackHandleScope<1> hs(soa.Self());
+        HandleWrapperObjPtr<mirror::String> h(hs.NewHandleWrapper(&s));
+        if (!kUseReadBarrier) {
+          heap->IncrementDisableMovingGC(soa.Self());
+        } else {
+          // For the CC collector, we only need to wait for the thread flip rather
+          // than the whole GC to occur thanks to the to-space invariant.
+          heap->IncrementDisableThreadFlip(soa.Self());
+        }
+      }
       if (is_copy != nullptr) {
         *is_copy = JNI_FALSE;
       }
@@ -1946,14 +1955,16 @@ class JNI {
     ScopedObjectAccess soa(env);
     gc::Heap* heap = Runtime::Current()->GetHeap();
     ObjPtr<mirror::String> s = soa.Decode<mirror::String>(java_string);
-    if (heap->IsMovableObject(s)) {
+    if (!s->IsCompressed() && heap->IsMovableObject(s)) {
       if (!kUseReadBarrier) {
         heap->DecrementDisableMovingGC(soa.Self());
       } else {
         heap->DecrementDisableThreadFlip(soa.Self());
       }
     }
-    if (s->IsCompressed() || (s->IsCompressed() == false && s->GetValue() != chars)) {
+    // TODO: For uncompressed strings GetStringCritical() always returns `s->GetValue()`.
+    // Should we report an error if the user passes a different `chars`?
+    if (s->IsCompressed() || (!s->IsCompressed() && s->GetValue() != chars)) {
       delete[] chars;
     }
   }
@@ -1971,8 +1982,9 @@ class JNI {
     char* bytes = new char[byte_count + 1];
     CHECK(bytes != nullptr);  // bionic aborts anyway.
     if (s->IsCompressed()) {
+      const uint8_t* src = s->GetValueCompressed();
       for (size_t i = 0; i < byte_count; ++i) {
-        bytes[i] = s->CharAt(i);
+        bytes[i] = src[i];
       }
     } else {
       const uint16_t* chars = s->GetValue();
@@ -2305,6 +2317,7 @@ class JNI {
       return JNI_ERR;  // Not reached except in unit tests.
     }
     CHECK_NON_NULL_ARGUMENT_FN_NAME("RegisterNatives", java_class, JNI_ERR);
+    ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
     ScopedObjectAccess soa(env);
     StackHandleScope<1> hs(soa.Self());
     Handle<mirror::Class> c = hs.NewHandle(soa.Decode<mirror::Class>(java_class));
@@ -2421,7 +2434,7 @@ class JNI {
         // TODO: make this a hard register error in the future.
       }
 
-      const void* final_function_ptr = m->RegisterNative(fnPtr);
+      const void* final_function_ptr = class_linker->RegisterNative(soa.Self(), m, fnPtr);
       UNUSED(final_function_ptr);
     }
     return JNI_OK;
@@ -2435,10 +2448,11 @@ class JNI {
     VLOG(jni) << "[Unregistering JNI native methods for " << mirror::Class::PrettyClass(c) << "]";
 
     size_t unregistered_count = 0;
-    auto pointer_size = Runtime::Current()->GetClassLinker()->GetImagePointerSize();
+    ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+    auto pointer_size = class_linker->GetImagePointerSize();
     for (auto& m : c->GetMethods(pointer_size)) {
       if (m.IsNative()) {
-        m.UnregisterNative();
+        class_linker->UnregisterNative(soa.Self(), &m);
         unregistered_count++;
       }
     }
@@ -2519,13 +2533,45 @@ class JNI {
   }
 
   static void* GetDirectBufferAddress(JNIEnv* env, jobject java_buffer) {
+    // Return null if |java_buffer| is not defined.
+    if (java_buffer == nullptr) {
+      return nullptr;
+    }
+
+    // Return null if |java_buffer| is not a java.nio.Buffer instance.
+    if (!IsInstanceOf(env, java_buffer, WellKnownClasses::java_nio_Buffer)) {
+      return nullptr;
+    }
+
+    // Buffer.address is non-null when the |java_buffer| is direct.
     return reinterpret_cast<void*>(env->GetLongField(
-        java_buffer, WellKnownClasses::java_nio_DirectByteBuffer_effectiveDirectAddress));
+        java_buffer, WellKnownClasses::java_nio_Buffer_address));
   }
 
   static jlong GetDirectBufferCapacity(JNIEnv* env, jobject java_buffer) {
+    if (java_buffer == nullptr) {
+      return -1;
+    }
+
+    if (!IsInstanceOf(env, java_buffer, WellKnownClasses::java_nio_Buffer)) {
+      return -1;
+    }
+
+    // When checking the buffer capacity, it's important to note that a zero-sized direct buffer
+    // may have a null address field which means we can't tell whether it is direct or not.
+    // We therefore call Buffer.isDirect(). One path that creates such a buffer is
+    // FileChannel.map() if the file size is zero.
+    //
+    // NB GetDirectBufferAddress() does not need to call Buffer.isDirect() since it is only
+    // able return a valid address if the Buffer address field is not-null.
+    jboolean direct = env->CallBooleanMethod(java_buffer,
+                                             WellKnownClasses::java_nio_Buffer_isDirect);
+    if (!direct) {
+      return -1;
+    }
+
     return static_cast<jlong>(env->GetIntField(
-        java_buffer, WellKnownClasses::java_nio_DirectByteBuffer_capacity));
+        java_buffer, WellKnownClasses::java_nio_Buffer_capacity));
   }
 
   static jobjectRefType GetObjectRefType(JNIEnv* env ATTRIBUTE_UNUSED, jobject java_object) {
@@ -2651,7 +2697,7 @@ class JNI {
     bool is_copy = array_data != elements;
     size_t bytes = array->GetLength() * component_size;
     if (is_copy) {
-      // Sanity check: If elements is not the same as the java array's data, it better not be a
+      // Integrity check: If elements is not the same as the java array's data, it better not be a
       // heap address. TODO: This might be slow to check, may be worth keeping track of which
       // copies we make?
       if (heap->IsNonDiscontinuousSpaceHeapAddress(elements)) {

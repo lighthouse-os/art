@@ -25,15 +25,24 @@ cc_object {
     ],
     header_libs: [
         "art_libartbase_headers", // For base/bit_utils.h
+        "jni_headers",
         "libart_runtime_headers_ndk",
         "libdexfile_all_headers", // For dex/modifiers.h
     ],
+    target: {
+        android: {
+            header_libs: ["libc_headers"], // TODO(b/153662223): Clean this up.
+        },
+        linux_bionic: {
+            header_libs: ["libc_headers"], // TODO(b/153662223): Clean this up.
+        },
+    },
     // Produce text file rather than binary.
     cflags: ["-S"],
     srcs: ["asm_defines.cc"],
     apex_available: [
+        "com.android.art",
         "com.android.art.debug",
-        "com.android.art.release",
     ],
 }
 
@@ -53,8 +62,8 @@ cc_genrule {
     },
 
     apex_available: [
+        "com.android.art",
         "com.android.art.debug",
-        "com.android.art.release",
     ],
 }
 
@@ -64,8 +73,8 @@ cc_library_headers {
     export_include_dirs: ["."],
 
     apex_available: [
+        "com.android.art",
         "com.android.art.debug",
-        "com.android.art.release",
     ],
 }
 

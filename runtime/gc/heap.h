@@ -35,7 +35,6 @@
 #include "gc/collector/iteration.h"
 #include "gc/collector_type.h"
 #include "gc/gc_cause.h"
-#include "gc/space/image_space_loading_order.h"
 #include "gc/space/large_object_space.h"
 #include "handle.h"
 #include "obj_ptr.h"
@@ -163,12 +162,13 @@ class Heap {
 
   // Client should call NotifyNativeAllocation every kNotifyNativeInterval allocations.
   // Should be chosen so that time_to_call_mallinfo / kNotifyNativeInterval is on the same order
-  // as object allocation time. time_to_call_mallinfo seems to be on the order of 1 usec.
+  // as object allocation time. time_to_call_mallinfo seems to be on the order of 1 usec
+  // on Android.
 #ifdef __ANDROID__
   static constexpr uint32_t kNotifyNativeInterval = 32;
 #else
   // Some host mallinfo() implementations are slow. And memory is less scarce.
-  static constexpr uint32_t kNotifyNativeInterval = 512;
+  static constexpr uint32_t kNotifyNativeInterval = 384;
 #endif
 
   // RegisterNativeAllocation checks immediately whether GC is needed if size exceeds the
@@ -210,6 +210,7 @@ class Heap {
        size_t long_pause_threshold,
        size_t long_gc_threshold,
        bool ignore_target_footprint,
+       bool always_log_explicit_gcs,
        bool use_tlab,
        bool verify_pre_gc_heap,
        bool verify_pre_sweeping_heap,
@@ -223,8 +224,7 @@ class Heap {
        bool use_generational_cc,
        uint64_t min_interval_homogeneous_space_compaction_by_oom,
        bool dump_region_info_before_gc,
-       bool dump_region_info_after_gc,
-       space::ImageSpaceLoadingOrder image_space_loading_order);
+       bool dump_region_info_after_gc);
 
   ~Heap();
 
@@ -330,7 +330,7 @@ class Heap {
   // proper lock ordering for it.
   void VerifyObjectBody(ObjPtr<mirror::Object> o) NO_THREAD_SAFETY_ANALYSIS;
 
-  // Check sanity of all live references.
+  // Consistency check of all live references.
   void VerifyHeap() REQUIRES(!Locks::heap_bitmap_lock_);
   // Returns how many failures occured.
   size_t VerifyHeapReferences(bool verify_referents = true)
@@ -390,23 +390,6 @@ class Heap {
   void CountInstances(const std::vector<Handle<mirror::Class>>& classes,
                       bool use_is_assignable_from,
                       uint64_t* counts)
-      REQUIRES(!Locks::heap_bitmap_lock_, !*gc_complete_lock_)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  // Implements VMDebug.getInstancesOfClasses and JDWP RT_Instances.
-  void GetInstances(VariableSizedHandleScope& scope,
-                    Handle<mirror::Class> c,
-                    bool use_is_assignable_from,
-                    int32_t max_count,
-                    std::vector<Handle<mirror::Object>>& instances)
-      REQUIRES(!Locks::heap_bitmap_lock_, !*gc_complete_lock_)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  // Implements JDWP OR_ReferringObjects.
-  void GetReferringObjects(VariableSizedHandleScope& scope,
-                           Handle<mirror::Object> o,
-                           int32_t max_count,
-                           std::vector<Handle<mirror::Object>>& referring_objects)
       REQUIRES(!Locks::heap_bitmap_lock_, !*gc_complete_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -509,7 +492,7 @@ class Heap {
     verify_object_mode_ = kVerifyObjectModeDisabled;
   }
 
-  // Other checks may be performed if we know the heap should be in a sane state.
+  // Other checks may be performed if we know the heap should be in a healthy state.
   bool IsObjectValidationEnabled() const {
     return verify_object_mode_ > kVerifyObjectModeDisabled;
   }
@@ -796,13 +779,18 @@ class Heap {
 
   // Returns the active concurrent copying collector.
   collector::ConcurrentCopying* ConcurrentCopyingCollector() {
+    collector::ConcurrentCopying* active_collector =
+            active_concurrent_copying_collector_.load(std::memory_order_relaxed);
     if (use_generational_cc_) {
-      DCHECK((active_concurrent_copying_collector_ == concurrent_copying_collector_) ||
-             (active_concurrent_copying_collector_ == young_concurrent_copying_collector_));
+      DCHECK((active_collector == concurrent_copying_collector_) ||
+             (active_collector == young_concurrent_copying_collector_))
+              << "active_concurrent_copying_collector: " << active_collector
+              << " young_concurrent_copying_collector: " << young_concurrent_copying_collector_
+              << " concurrent_copying_collector: " << concurrent_copying_collector_;
     } else {
-      DCHECK_EQ(active_concurrent_copying_collector_, concurrent_copying_collector_);
+      DCHECK_EQ(active_collector, concurrent_copying_collector_);
     }
-    return active_concurrent_copying_collector_;
+    return active_collector;
   }
 
   CollectorType CurrentCollectorType() {
@@ -1050,6 +1038,7 @@ class Heap {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   mirror::Object* AllocWithNewTLAB(Thread* self,
+                                   AllocatorType allocator_type,
                                    size_t alloc_size,
                                    bool grow,
                                    size_t* bytes_allocated,
@@ -1303,6 +1292,10 @@ class Heap {
   // is useful for benchmarking since it reduces time spent in GC to a low %.
   const bool ignore_target_footprint_;
 
+  // If we are running tests or some other configurations we might not actually
+  // want logs for explicit gcs since they can get spammy.
+  const bool always_log_explicit_gcs_;
+
   // Lock which guards zygote space creation.
   Mutex zygote_creation_lock_;
 
@@ -1505,7 +1498,7 @@ class Heap {
 
   std::vector<collector::GarbageCollector*> garbage_collectors_;
   collector::SemiSpace* semi_space_collector_;
-  collector::ConcurrentCopying* active_concurrent_copying_collector_;
+  Atomic<collector::ConcurrentCopying*> active_concurrent_copying_collector_;
   collector::ConcurrentCopying* young_concurrent_copying_collector_;
   collector::ConcurrentCopying* concurrent_copying_collector_;
 

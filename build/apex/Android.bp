@@ -3,8 +3,17 @@
 // Contains both the Android Managed Runtime (ART) and the Android Core Library
 // (Libcore).
 
+soong_config_module_type_import {
+    from: "art/build/SoongConfig.bp",
+    module_types: [
+        "art_module_apex_defaults",
+        "art_module_cc_defaults",
+        "art_module_genrule_defaults",
+    ],
+}
+
 // Modules listed in LOCAL_REQUIRED_MODULES for module art-runtime in art/Android.mk.
-// - Base requirements (binaries for which both 32- and 64-bit versions are built, if relevant).
+// - Base requirements (binaries for which both 32- and 64-bit versions are built, if possible).
 art_runtime_base_binaries_both = [
     "dalvikvm",
 ]
@@ -17,6 +26,7 @@ art_runtime_base_binaries_prefer32_on_device_first_on_host = [
     "dexoptanalyzer",
     "profman",
 ]
+
 // - Base requirements (libraries).
 //
 // Note: ART on-device chroot-based testing and benchmarking is not yet using
@@ -117,6 +127,7 @@ art_tools_debug_binaries_both = [
 
 // Tools exclusively for the device APEX derived from art-tools in art/Android.mk.
 art_tools_device_only_binaries = [
+    "compile_bcp.sh",
     // oatdump cannot link with host linux_bionic due to not using clang lld;
     // TODO: Make it work with clang lld.
     "oatdump",
@@ -140,7 +151,6 @@ art_tools_host_only_binaries = [
 libcore_java_libs = [
     "core-oj",
     "core-libart",
-    "core-icu4j",
     "okhttp",
     "bouncycastle",
     "apache-xml",
@@ -159,25 +169,15 @@ libcore_java_libs = [
 // the ART APEX.
 libcore_native_shared_libs = [
     // External API (having APEX stubs).
-    "libandroidicu",
     "libandroidio",
     // TODO(b/124476339): Clean up the following libraries once "required"
     // dependencies work with APEX libraries.
     "libexpat",
-    "libicui18n",
-    "libicuuc",
-    "libicu_jni",
     "libjavacore",
     "libopenjdk",
 ]
 libcore_debug_native_shared_libs = [
     "libopenjdkd",
-]
-
-libcore_native_device_only_shared_libs = [
-    // TODO(b/122876336): Remove libpac.so once it's migrated to Webview.
-    // libpac is used by frameworks, not by ART host.
-    "libpac",
 ]
 
 // Temporary library includes for b/123591866 as all libraries are moved into the main art-apex.
@@ -199,22 +199,36 @@ apex_key {
     private_key: "com.android.art.pem",
 }
 
-prebuilt_etc {
-    name: "com.android.art.ld.config.txt",
-    src: "ld.config.txt",
-    filename: "ld.config.txt",
-    installable: false,
+art_module_apex_defaults {
+    name: "com.android.art-defaults",
+
+    // Enable if SOONG_CONFIG_art_module_source_build is true.
+    enabled: false,
+    soong_config_variables: {
+        source_build: {
+            enabled: true,
+        },
+    },
+
+    target: {
+        windows: {
+            // When the Soong config variable above sets enabled:true, it
+            // overrides the default false for targets, so we need to disable
+            // windows explicitly.
+            enabled: false,
+        },
+    },
 }
 
 // Default values shared by device ART APEXes.
 apex_defaults {
-    name: "com.android.art-defaults",
+    name: "com.android.art-device-defaults",
+    defaults: ["com.android.art-defaults"],
     compile_multilib: "both",
     manifest: "manifest-art.json",
     java_libs: libcore_java_libs,
     native_shared_libs: art_runtime_base_native_shared_libs +
         art_runtime_base_native_device_only_shared_libs +
-        libcore_native_device_only_shared_libs +
         libcore_native_shared_libs,
     multilib: {
         both: {
@@ -229,18 +243,27 @@ apex_defaults {
                 art_tools_device_only_binaries,
         },
     },
-    prebuilts: ["com.android.art.ld.config.txt"],
     key: "com.android.art.key",
     required: [
-        "art_apex_boot_integrity",
         "com.android.i18n",
     ],
+    prebuilts: [
+        "art-linker-config",
+    ],
+    // ART APEXes depend on bouncycastle which is disabled for PDK builds.
+    // Since the dependency is disabled, ART APEXes can't be built either.
+    // Disable the APEXes too. See b/157267166.
+    product_variables: {
+        pdk: {
+            enabled: false,
+        },
+    },
 }
 
 // Default values shared by (device) Debug and Testing ART APEXes.
 apex_defaults {
-    name: "com.android.art-dev-defaults",
-    defaults: ["com.android.art-defaults"],
+    name: "com.android.art-devel-defaults",
+    defaults: ["com.android.art-device-defaults"],
     native_shared_libs: art_runtime_base_native_device_only_debug_shared_libs +
         art_runtime_run_test_libs +
         art_runtime_debug_native_shared_libs +
@@ -264,8 +287,8 @@ apex_defaults {
 // variants nor tools), included in user builds. Also used for
 // storage-constrained devices in userdebug and eng builds.
 art_apex {
-    name: "com.android.art.release",
-    defaults: ["com.android.art-defaults"],
+    name: "com.android.art",
+    defaults: ["com.android.art-device-defaults"],
     certificate: ":com.android.art.certificate",
 }
 
@@ -274,7 +297,7 @@ art_apex {
 // eng build.
 art_apex {
     name: "com.android.art.debug",
-    defaults: ["com.android.art-dev-defaults"],
+    defaults: ["com.android.art-devel-defaults"],
     certificate: ":com.android.art.certificate",
 }
 
@@ -307,7 +330,7 @@ art_gtests = [
 // purposes only.
 art_apex_test {
     name: "com.android.art.testing",
-    defaults: ["com.android.art-dev-defaults"],
+    defaults: ["com.android.art-devel-defaults"],
     file_contexts: ":com.android.art.debug-file_contexts",
     certificate: ":com.android.art.certificate",
     tests: art_gtests,
@@ -321,6 +344,7 @@ art_apex_test {
 // See b/120617876 for more information.
 art_apex_test_host {
     name: "com.android.art.host",
+    defaults: ["com.android.art-defaults"],
     compile_multilib: "both",
     payload_type: "zip",
     host_supported: true,
@@ -364,6 +388,14 @@ art_apex_test_host {
             },
         },
     },
+    // ART APEXes depend on bouncycastle which is disabled for PDK builds.
+    // Since the dependency is disabled, ART APEXes can't be built either.
+    // Disable the APEXes too. See b/157267166.
+    product_variables: {
+        pdk: {
+            enabled: false,
+        },
+    },
 }
 
 python_binary_host {
@@ -388,18 +420,36 @@ art_check_apex_gen_stem = "$(location art-apex-tester)" +
 
 // The non-flattened APEXes are always checked, as they are always generated
 // (even when APEX flattening is enabled).
-genrule_defaults {
+art_module_genrule_defaults {
     name: "art-check-apex-gen-defaults",
+
+    // Enable if SOONG_CONFIG_art_module_source_build is true.
+    enabled: false,
+    soong_config_variables: {
+        source_build: {
+            enabled: true,
+        },
+    },
+
     tools: [
         "art-apex-tester",
         "debugfs",
     ],
 }
 
-cc_defaults {
+art_module_cc_defaults {
     name: "art-check-apex-gen-fakebin-defaults",
     host_supported: true,
     device_supported: false,
+
+    // Enable if SOONG_CONFIG_art_module_source_build is true.
+    enabled: false,
+    soong_config_variables: {
+        source_build: {
+            enabled: true,
+        },
+    },
+
     target: {
         darwin: {
             enabled: false, // No python3.
@@ -410,12 +460,13 @@ cc_defaults {
 genrule {
     name: "art-check-release-apex-gen",
     defaults: ["art-check-apex-gen-defaults"],
-    srcs: [":com.android.art.release"],
+    srcs: [":com.android.art"],
     cmd: art_check_apex_gen_stem +
         " --flavor release" +
         " $(in)" +
-        " && touch $(out)",
-    out: ["art-check-release-apex-gen.dummy"],
+        " && touch $(out)" +
+        " && chmod a+x $(out)",
+    out: ["art-check-release-apex-gen.unused"],
 }
 
 cc_prebuilt_binary {
@@ -431,8 +482,9 @@ genrule {
     cmd: art_check_apex_gen_stem +
         " --flavor debug" +
         " $(in)" +
-        " && touch $(out)",
-    out: ["art-check-debug-apex-gen.dummy"],
+        " && touch $(out)" +
+        " && chmod a+x $(out)",
+    out: ["art-check-debug-apex-gen.unused"],
 }
 
 cc_prebuilt_binary {
@@ -448,12 +500,19 @@ genrule {
     cmd: art_check_apex_gen_stem +
         " --flavor testing" +
         " $(in)" +
-        " && touch $(out)",
-    out: ["art-check-testing-apex-gen.dummy"],
+        " && touch $(out)" +
+        " && chmod a+x $(out)",
+    out: ["art-check-testing-apex-gen.unused"],
 }
 
 cc_prebuilt_binary {
     name: "art-check-testing-apex-gen-fakebin",
     defaults: ["art-check-apex-gen-fakebin-defaults"],
     srcs: [":art-check-testing-apex-gen"],
+}
+
+linker_config {
+    name: "art-linker-config",
+    src: "linker.config.json",
+    installable: false,
 }

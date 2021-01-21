@@ -18,7 +18,7 @@ cc_library {
     name: "libsigchain",
     defaults: ["art_defaults"],
     visibility: [
-        // TODO(b/133140750): Clean this up.
+        // TODO(b/142944043, b/133140750): Clean this up.
         "//frameworks/base/cmds/app_process",
     ],
 
@@ -26,7 +26,7 @@ cc_library {
     target: {
         linux: {
             shared: {
-                srcs: ["sigchain_dummy.cc"],
+                srcs: ["sigchain_fake.cc"],
             },
             static: {
                 srcs: ["sigchain.cc"],
@@ -34,7 +34,7 @@ cc_library {
         },
 
         darwin: {
-            srcs: ["sigchain_dummy.cc"],
+            srcs: ["sigchain_fake.cc"],
         },
 
         android: {
@@ -44,22 +44,22 @@ cc_library {
 
     export_include_dirs: ["."],
     apex_available: [
-        "com.android.art.release",
+        "com.android.art",
         "com.android.art.debug",
-        // TODO(b/142944931) Clean this up. This is due to the dependency from
+        // TODO(b/142944043) Clean this up. This is due to the dependency from
         // app_process
         "//apex_available:platform",
     ],
 }
 
-// Create a dummy version of libsigchain which expose the necessary symbols
+// Create a fake version of libsigchain which expose the necessary symbols
 // but throws when called. This can be used to get static binaries which don't
 // need the real functionality of the sig chain but need to please the linker.
 cc_library_static {
-    name: "libsigchain_dummy",
+    name: "libsigchain_fake",
     host_supported: true,
     defaults: ["art_defaults"],
-    srcs: ["sigchain_dummy.cc"],
+    srcs: ["sigchain_fake.cc"],
     target: {
         android: {
             whole_static_libs: ["libasync_safe"],
@@ -76,22 +76,4 @@ art_cc_test {
     ],
     srcs: ["sigchain_test.cc"],
     whole_static_libs: ["libsigchain"],
-}
-
-filegroup {
-    name: "art_sigchain_version_script32.txt",
-    visibility: [
-        // TODO(b/133140750): Clean this up.
-        "//frameworks/base/cmds/app_process",
-    ],
-    srcs: ["version-script32.txt"],
-}
-
-filegroup {
-    name: "art_sigchain_version_script64.txt",
-    visibility: [
-        // TODO(b/133140750): Clean this up.
-        "//frameworks/base/cmds/app_process",
-    ],
-    srcs: ["version-script64.txt"],
 }

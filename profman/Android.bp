@@ -48,7 +48,7 @@ art_cc_binary {
         "libartbase",
     ],
     apex_available: [
-        "com.android.art.release",
+        "com.android.art",
         "com.android.art.debug",
     ],
 }
@@ -98,5 +98,13 @@ art_cc_test {
     shared_libs: [
         "libprofiled",
     ],
+    data: [
+        ":art-gtest-jars-ProfileTestMultiDex",
+    ],
     srcs: ["profile_assistant_test.cc"],
+    target: {
+        host: {
+            required: ["profmand"],
+        },
+    },
 }

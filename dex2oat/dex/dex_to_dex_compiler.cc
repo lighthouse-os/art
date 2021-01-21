@@ -44,8 +44,6 @@ using android::base::StringPrintf;
 
 // Controls quickening activation.
 const bool kEnableQuickening = true;
-// Control check-cast elision.
-const bool kEnableCheckCastEllision = true;
 
 // Holds the state for compiling a single method.
 struct DexToDexCompiler::CompilationState {
@@ -75,11 +73,6 @@ struct DexToDexCompiler::CompilationState {
   // Compiles a RETURN-VOID into a RETURN-VOID-BARRIER within a constructor where
   // a barrier is required.
   void CompileReturnVoid(Instruction* inst, uint32_t dex_pc);
-
-  // Compiles a CHECK-CAST into 2 NOP instructions if it is known to be safe. In
-  // this case, returns the second NOP instruction pointer. Otherwise, returns
-  // the given "inst".
-  Instruction* CompileCheckCast(Instruction* inst, uint32_t dex_pc);
 
   // Compiles a field access into a quick field access.
   // The field index is replaced by an offset within an Object where we can read
@@ -224,15 +217,6 @@ std::vector<uint8_t> DexToDexCompiler::CompilationState::Compile() {
         CompileReturnVoid(inst, dex_pc);
         break;
 
-      case Instruction::CHECK_CAST:
-        inst = CompileCheckCast(inst, dex_pc);
-        if (inst->Opcode() == Instruction::NOP) {
-          // We turned the CHECK_CAST into two NOPs, avoid visiting the second NOP twice since this
-          // would add 2 quickening info entries.
-          ++it;
-        }
-        break;
-
       case Instruction::IGET:
       case Instruction::IGET_QUICK:
         CompileInstanceFieldAccess(inst, dex_pc, Instruction::IGET_QUICK, false);
@@ -313,26 +297,6 @@ std::vector<uint8_t> DexToDexCompiler::CompilationState::Compile() {
         CompileInvokeVirtual(inst, dex_pc, Instruction::INVOKE_VIRTUAL_RANGE_QUICK, true);
         break;
 
-      case Instruction::NOP:
-        if (already_quickened_) {
-          const uint16_t reference_index = NextIndex();
-          quickened_info_.push_back(QuickenedInfo(dex_pc, reference_index));
-          if (reference_index == DexFile::kDexNoIndex16) {
-            // This means it was a normal nop and not a check-cast.
-            break;
-          }
-          const uint16_t type_index = NextIndex();
-          if (driver_.IsSafeCast(&unit_, dex_pc)) {
-            quickened_info_.push_back(QuickenedInfo(dex_pc, type_index));
-          }
-          ++it;
-        } else {
-          // We need to differentiate between check cast inserted NOP and normal NOP, put an invalid
-          // index in the map for normal nops. This should be rare in real code.
-          quickened_info_.push_back(QuickenedInfo(dex_pc, DexFile::kDexNoIndex16));
-        }
-        break;
-
       default:
         // Nothing to do.
         break;
@@ -387,40 +351,6 @@ void DexToDexCompiler::CompilationState::CompileReturnVoid(Instruction* inst, ui
                  << GetDexFile().PrettyMethod(unit_.GetDexMethodIndex(), true);
   inst->SetOpcode(Instruction::RETURN_VOID_NO_BARRIER);
   optimized_return_void_ = true;
-}
-
-Instruction* DexToDexCompiler::CompilationState::CompileCheckCast(Instruction* inst,
-                                                                  uint32_t dex_pc) {
-  if (!kEnableCheckCastEllision) {
-    return inst;
-  }
-  if (!driver_.IsSafeCast(&unit_, dex_pc)) {
-    return inst;
-  }
-  // Ok, this is a safe cast. Since the "check-cast" instruction size is 2 code
-  // units and a "nop" instruction size is 1 code unit, we need to replace it by
-  // 2 consecutive NOP instructions.
-  // Because the caller loops over instructions by calling Instruction::Next onto
-  // the current instruction, we need to return the 2nd NOP instruction. Indeed,
-  // its next instruction is the former check-cast's next instruction.
-  VLOG(compiler) << "Removing " << Instruction::Name(inst->Opcode())
-                 << " by replacing it with 2 NOPs at dex pc "
-                 << StringPrintf("0x%x", dex_pc) << " in method "
-                 << GetDexFile().PrettyMethod(unit_.GetDexMethodIndex(), true);
-  if (!already_quickened_) {
-    quickened_info_.push_back(QuickenedInfo(dex_pc, inst->VRegA_21c()));
-    quickened_info_.push_back(QuickenedInfo(dex_pc, inst->VRegB_21c()));
-
-    // We are modifying 4 consecutive bytes.
-    inst->SetOpcode(Instruction::NOP);
-    inst->SetVRegA_10x(0u);  // keep compliant with verifier.
-    // Get to next instruction which is the second half of check-cast and replace
-    // it by a NOP.
-    inst = const_cast<Instruction*>(inst->Next());
-    inst->SetOpcode(Instruction::NOP);
-    inst->SetVRegA_10x(0u);  // keep compliant with verifier.
-  }
-  return inst;
 }
 
 void DexToDexCompiler::CompilationState::CompileInstanceFieldAccess(Instruction* inst,
@@ -581,8 +511,8 @@ CompiledMethod* DexToDexCompiler::CompileMethod(
       CHECK(inserted) << "Failed to insert " << dex_file.PrettyMethod(method_idx);
     }
 
-    // Easy sanity check is to check that the existing stuff matches by re-quickening using the
-    // newly produced quicken data.
+    // Easy check of the validity is to check that the existing stuff matches by re-quickening using
+    // the newly produced quicken data.
     // Note that this needs to be behind the lock for this case since we may unquicken in another
     // thread.
     if (kIsDebugBuild) {
@@ -594,8 +524,8 @@ CompiledMethod* DexToDexCompiler::CompileMethod(
     CompilationState state(this, unit, compilation_level, /*quicken_data*/ nullptr);
     quicken_data = state.Compile();
 
-    // Easy sanity check is to check that the existing stuff matches by re-quickening using the
-    // newly produced quicken data.
+    // Easy check of the validity is to check that the existing stuff matches by re-quickening using
+    // the newly produced quicken data.
     if (kIsDebugBuild) {
       CompilationState state2(this, unit, compilation_level, &quicken_data);
       std::vector<uint8_t> new_data = state2.Compile();

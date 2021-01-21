@@ -61,7 +61,7 @@
 #include "base/utils.h"
 #include "class_linker-inl.h"
 #include "class_linker.h"
-#include "class_root.h"
+#include "class_root-inl.h"
 #include "class_status.h"
 #include "debugger.h"
 #include "dex/art_dex_file_loader.h"
@@ -186,7 +186,7 @@ class ObsoleteMap {
       DCHECK(obsolete_dex_caches_->Get(next_free_slot_) != nullptr);
       next_free_slot_++;
     }
-    // Sanity check that the same slot in obsolete_dex_caches_ is free.
+    // Check that the same slot in obsolete_dex_caches_ is free.
     DCHECK(obsolete_dex_caches_->Get(next_free_slot_) == nullptr);
   }
 
@@ -260,7 +260,7 @@ class ObsoleteMap {
 };
 
 // This visitor walks thread stacks and allocates and sets up the obsolete methods. It also does
-// some basic sanity checks that the obsolete method is sane.
+// some basic soundness checks that the obsolete method is valid.
 class ObsoleteMethodStackVisitor : public art::StackVisitor {
  protected:
   ObsoleteMethodStackVisitor(
@@ -758,13 +758,10 @@ art::mirror::DexCache* Redefiner::ClassRedefinition::CreateNewDexCache(
     return nullptr;
   }
   art::WriterMutexLock mu(driver_->self_, *art::Locks::dex_lock_);
-  art::mirror::DexCache::InitializeDexCache(driver_->self_,
-                                            cache.Get(),
-                                            location.Get(),
-                                            dex_file_.get(),
-                                            loader.IsNull() ? driver_->runtime_->GetLinearAlloc()
-                                                            : loader->GetAllocator(),
-                                            art::kRuntimePointerSize);
+  cache->SetLocation(location.Get());
+  cache->InitializeNativeFields(dex_file_.get(),
+                                loader.IsNull() ? driver_->runtime_->GetLinearAlloc()
+                                                : loader->GetAllocator());
   return cache.Get();
 }
 
@@ -1173,7 +1170,7 @@ bool Redefiner::ClassRedefinition::CheckRedefinitionIsValid() {
 class RedefinitionDataIter;
 
 // A wrapper that lets us hold onto the arbitrary sized data needed for redefinitions in a
-// reasonably sane way. This adds no fields to the normal ObjectArray. By doing this we can avoid
+// reasonable way. This adds no fields to the normal ObjectArray. By doing this we can avoid
 // having to deal with the fact that we need to hold an arbitrary number of references live.
 class RedefinitionDataHolder {
  public:
@@ -2583,7 +2580,10 @@ void Redefiner::ClassRedefinition::UpdateMethods(art::ObjPtr<art::mirror::Class>
     uint32_t dex_method_idx = dex_file_->GetIndexForMethodId(*method_id);
     method.SetDexMethodIndex(dex_method_idx);
     linker->SetEntryPointsToInterpreter(&method);
-    method.SetCodeItemOffset(dex_file_->FindCodeItemOffset(class_def, dex_method_idx));
+    if (method.HasCodeItem()) {
+      method.SetCodeItem(
+          dex_file_->GetCodeItem(dex_file_->FindCodeItemOffset(class_def, dex_method_idx)));
+    }
     // Clear all the intrinsics related flags.
     method.SetNotIntrinsic();
   }

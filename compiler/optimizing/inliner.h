@@ -37,7 +37,6 @@ class HInliner : public HOptimization {
            CodeGenerator* codegen,
            const DexCompilationUnit& outer_compilation_unit,
            const DexCompilationUnit& caller_compilation_unit,
-           VariableSizedHandleScope* handles,
            OptimizingCompilerStats* stats,
            size_t total_number_of_dex_registers,
            size_t total_number_of_instructions,
@@ -54,7 +53,6 @@ class HInliner : public HOptimization {
         parent_(parent),
         depth_(depth),
         inlining_budget_(0),
-        handles_(handles),
         inline_stats_(nullptr) {}
 
   bool Run() override;
@@ -120,7 +118,7 @@ class HInliner : public HOptimization {
 
   // Try to recognize known simple patterns and replace invoke call with appropriate instructions.
   bool TryPatternSubstitution(HInvoke* invoke_instruction,
-                              ArtMethod* resolved_method,
+                              ArtMethod* method,
                               HInstruction** return_replacement)
     REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -168,10 +166,7 @@ class HInliner : public HOptimization {
                                             bool* is_final = nullptr);
 
   // Try inlining the invoke instruction using inline caches.
-  bool TryInlineFromInlineCache(
-      const DexFile& caller_dex_file,
-      HInvoke* invoke_instruction,
-      ArtMethod* resolved_method)
+  bool TryInlineFromInlineCache(HInvoke* invoke_instruction)
     REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Try getting the inline cache from JIT code cache.
@@ -186,7 +181,7 @@ class HInliner : public HOptimization {
   // Try getting the inline cache from AOT offline profile.
   // Return true if the inline cache was successfully allocated and the
   // invoke info was found in the profile info.
-  InlineCacheType GetInlineCacheAOT(const DexFile& caller_dex_file,
+  InlineCacheType GetInlineCacheAOT(
       HInvoke* invoke_instruction,
       StackHandleScope<1>* hs,
       /*out*/Handle<mirror::ObjectArray<mirror::Class>>* inline_cache)
@@ -211,18 +206,15 @@ class HInliner : public HOptimization {
   // if (receiver.getClass() != ic.GetMonomorphicType()) deopt
   // ... // inlined code
   bool TryInlineMonomorphicCall(HInvoke* invoke_instruction,
-                                ArtMethod* resolved_method,
                                 Handle<mirror::ObjectArray<mirror::Class>> classes)
     REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Try to inline targets of a polymorphic call.
   bool TryInlinePolymorphicCall(HInvoke* invoke_instruction,
-                                ArtMethod* resolved_method,
                                 Handle<mirror::ObjectArray<mirror::Class>> classes)
     REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool TryInlinePolymorphicCallToSameTarget(HInvoke* invoke_instruction,
-                                            ArtMethod* resolved_method,
                                             Handle<mirror::ObjectArray<mirror::Class>> classes)
     REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -249,11 +241,6 @@ class HInliner : public HOptimization {
 
   void FixUpReturnReferenceType(ArtMethod* resolved_method, HInstruction* return_replacement)
     REQUIRES_SHARED(Locks::mutator_lock_);
-
-  // Creates an instance of ReferenceTypeInfo from `klass` if `klass` is
-  // admissible (see ReferenceTypePropagation::IsAdmissible for details).
-  // Otherwise returns inexact Object RTI.
-  ReferenceTypeInfo GetClassRTI(ObjPtr<mirror::Class> klass) REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool ArgumentTypesMoreSpecific(HInvoke* invoke_instruction, ArtMethod* resolved_method)
     REQUIRES_SHARED(Locks::mutator_lock_);
@@ -335,7 +322,6 @@ class HInliner : public HOptimization {
 
   // The budget left for inlining, in number of instructions.
   size_t inlining_budget_;
-  VariableSizedHandleScope* const handles_;
 
   // Used to record stats about optimizations on the inlined graph.
   // If the inlining is successful, these stats are merged to the caller graph's stats.

@@ -51,31 +51,31 @@ cc_defaults {
     target: {
         android: {
             srcs: [
+                "base/globals_unix.cc",
                 "base/mem_map_unix.cc",
             ],
             static_libs: [
                 // ZipArchive support, the order matters here to get all symbols.
                 "libziparchive",
-                "libz",
             ],
             shared_libs: [
+                "libz",
                 "liblog",
                 // For ashmem.
                 "libartpalette",
                 // For common macros.
                 "libbase",
             ],
-            export_shared_lib_headers: ["libbase"],
-            // Exclude the version script from Darwin host since it's not
-            // supported by the linker there. That means ASan checks on Darwin
-            // might trigger ODR violations.
-            version_script: "libartbase.map",
+            export_shared_lib_headers: ["libbase"], // ART's macros.h depends on libbase's macros.h.
         },
         not_windows: {
             srcs: [
                 "base/globals_unix.cc",
                 "base/mem_map_unix.cc",
             ],
+            static: {
+                cflags: ["-DART_STATIC_LIBARTBASE"],
+            },
             shared_libs: [
                 "libziparchive",
                 "libz",
@@ -85,13 +85,9 @@ cc_defaults {
                 // For common macros.
                 "libbase",
             ],
-            export_shared_lib_headers: ["libbase"],
-        },
-        linux_glibc: {
-            version_script: "libartbase.map",
+            export_shared_lib_headers: ["libbase"], // ART's macros.h depends on libbase's macros.h.
         },
         windows: {
-            version_script: "libartbase.map",
             srcs: [
                 "base/mem_map_windows.cc",
             ],
@@ -104,7 +100,8 @@ cc_defaults {
                 // For common macros.
                 "libbase",
             ],
-            export_static_lib_headers: ["libbase"],
+            export_static_lib_headers: ["libbase"], // ART's macros.h depends on libbase's macros.h.
+
             cflags: ["-Wno-thread-safety"],
         },
         darwin: {
@@ -114,23 +111,12 @@ cc_defaults {
     generated_sources: ["art_libartbase_operator_srcs"],
     cflags: ["-DBUILDING_LIBART=1"],
 
-    // Utilities used by various ART libs and tools are linked in statically
-    // here to avoid shared lib dependencies outside the ART APEX. No target
-    // there should depend on these separately.
-    whole_static_libs: [
-        "liblz4",
-        "liblzma",
-    ],
-
     export_include_dirs: ["."],
-    // ART's macros.h depends on libbase's macros.h.
-    // Note: runtime_options.h depends on cmdline. But we don't really want to export this
-    //       generically. dex2oat takes care of it itself.
 }
 
 cc_defaults {
     name: "libartbase_static_base_defaults",
-    static_libs: [
+    whole_static_libs: [
         "libbase",
         "libartpalette",
         "liblog",
@@ -142,13 +128,13 @@ cc_defaults {
 cc_defaults {
     name: "libartbase_static_defaults",
     defaults: ["libartbase_static_base_defaults"],
-    static_libs: ["libartbase"],
+    whole_static_libs: ["libartbase"],
 }
 
 cc_defaults {
     name: "libartbased_static_defaults",
     defaults: ["libartbase_static_base_defaults"],
-    static_libs: ["libartbased"],
+    whole_static_libs: ["libartbased"],
 }
 
 gensrcs {
@@ -168,13 +154,14 @@ art_cc_library {
     defaults: [
         "libartbase_defaults",
         "libart_nativeunwind_defaults",
+        "art_pgo_defaults",
     ],
     visibility: [
         // TODO(b/133140750): Clean this up.
         "//packages/modules/NetworkStack/tests:__subpackages__",
     ],
     apex_available: [
-        "com.android.art.release",
+        "com.android.art",
         "com.android.art.debug",
     ],
 
@@ -256,6 +243,7 @@ art_cc_test {
         "base/bit_utils_test.cc",
         "base/bit_vector_test.cc",
         "base/file_utils_test.cc",
+        "base/hash_map_test.cc",
         "base/hash_set_test.cc",
         "base/hex_dump_test.cc",
         "base/histogram_test.cc",
@@ -290,7 +278,7 @@ cc_library_headers {
     export_shared_lib_headers: ["libbase"],
 
     apex_available: [
+        "com.android.art",
         "com.android.art.debug",
-        "com.android.art.release",
     ],
 }
